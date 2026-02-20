@@ -225,54 +225,127 @@ function formatDate(dateStr: string): string {
 
 // --- HTML Rendering ---
 
+function narrateDay(day: DaySummary): string {
+  const parts: string[] = [];
+
+  // Opening: what happened
+  if (day.totalCycles === 0 && day.manualCommits === 0) {
+    return "No recorded activity this day.";
+  }
+
+  if (day.activeCycles > 0 && day.idleCycles > 0) {
+    parts.push(
+      `Ran ${day.totalCycles} cycles &mdash; ${day.activeCycles} active, ${day.idleCycles} on standby.`
+    );
+  } else if (day.activeCycles === 0) {
+    parts.push(
+      `Ran ${day.totalCycles} cycles, all on standby watching for messages and tasks.`
+    );
+  } else {
+    parts.push(`Ran ${day.totalCycles} cycles, all active.`);
+  }
+
+  // Errors
+  if (day.errorCycles > 0) {
+    parts.push(
+      `Hit ${day.errorCycles} issue${day.errorCycles > 1 ? "s" : ""} (see details below).`
+    );
+  }
+
+  // Balance narrative
+  if (day.balanceDelta !== null && day.balanceDelta > 0) {
+    parts.push(
+      `Balance grew by ${day.balanceDelta.toLocaleString()} sats to ${day.balanceEnd!.toLocaleString()} sats.`
+    );
+  } else if (day.balanceDelta !== null && day.balanceDelta < 0) {
+    parts.push(
+      `Spent ${Math.abs(day.balanceDelta).toLocaleString()} sats &mdash; balance now ${day.balanceEnd!.toLocaleString()} sats.`
+    );
+  } else if (day.balanceEnd !== null) {
+    parts.push(`Balance steady at ${day.balanceEnd.toLocaleString()} sats.`);
+  }
+
+  // Heartbeats
+  if (day.heartbeatStart !== null && day.heartbeatEnd !== null) {
+    const hbCount = day.heartbeatEnd - day.heartbeatStart + 1;
+    if (hbCount > 1) {
+      parts.push(`Sent ${hbCount} heartbeats (#${day.heartbeatStart}&ndash;#${day.heartbeatEnd}).`);
+    } else {
+      parts.push(`Sent heartbeat #${day.heartbeatEnd}.`);
+    }
+  }
+
+  // Notable events (the interesting stuff)
+  if (day.events.length > 0) {
+    const unique = [...new Set(day.events)];
+    if (unique.length <= 3) {
+      parts.push("Notable: " + unique.join(". ") + ".");
+    } else {
+      parts.push(
+        "Notable: " + unique.slice(0, 3).join(". ") +
+        `, and ${unique.length - 3} more event${unique.length - 3 > 1 ? "s" : ""}.`
+      );
+    }
+  }
+
+  return parts.join(" ");
+}
+
 function renderStatusBar(health: Health | null): string {
   if (!health) {
-    return `<div class="status-bar"><span class="status-dot off"></span> Status unavailable</div>`;
+    return `<div class="status-bar"><span class="status-dot off"></span><span class="status-narrative">Agent status unavailable.</span></div>`;
   }
   const nextAt = new Date(health.next_cycle_at);
   const bal = health.stats.sbtc_balance.toLocaleString();
+  const idle = health.stats.idle_cycles_count;
+  const statusText = idle > 5
+    ? `On standby since ${idle} cycles, watching for messages.`
+    : "Active and running tasks.";
   return `<div class="status-bar">
 <span class="status-dot on"></span>
-<span class="status-item"><strong>Cycle ${health.cycle}</strong></span>
-<span class="status-sep"></span>
-<span class="status-item">${bal} sats</span>
-<span class="status-sep"></span>
-<span class="status-item">Heartbeat #${health.stats.checkin_count}</span>
-<span class="status-sep"></span>
-<span class="status-item next-cycle" data-next="${nextAt.toISOString()}">Next cycle: <span class="countdown"></span></span>
+<span class="status-narrative">
+<strong>Cycle ${health.cycle}</strong> &mdash; ${statusText}
+Balance: <strong>${bal} sats</strong>. Heartbeat #${health.stats.checkin_count}.
+<span class="next-cycle" data-next="${nextAt.toISOString()}">Next wake-up in <span class="countdown"></span>.</span>
+</span>
 </div>`;
+}
+
+function narrateCycle(c: CycleEntry): string {
+  const time = c.timestamp.slice(11, 16);
+  if (c.cycle === null) {
+    // Manual commit
+    return `<strong>${time}</strong> &mdash; ${escapeHtml(c.message)}`;
+  }
+  const parts: string[] = [];
+  if (c.status === "idle") {
+    parts.push(`checked in (idle)`);
+  } else if (c.status === "error") {
+    parts.push(`ran into an issue`);
+  } else {
+    parts.push(`was active`);
+  }
+  if (c.events.length > 0) {
+    parts.push("&mdash; " + escapeHtml(c.events.join(", ")));
+  }
+  if (c.balanceDelta !== null && c.balanceDelta !== 0) {
+    const sign = c.balanceDelta > 0 ? "+" : "";
+    parts.push(
+      `(<span class="tl-delta ${c.balanceDelta > 0 ? "pos" : "neg"}">${sign}${c.balanceDelta} sats</span>)`
+    );
+  }
+  return `<strong>${time}</strong> Cycle ${c.cycle}: ${parts.join(" ")}`;
 }
 
 function renderDayCard(day: DaySummary): string {
   const today = new Date().toISOString().slice(0, 10);
   const isToday = day.date === today;
   const label = isToday ? "Today" : formatDate(day.date);
-  const ratio =
-    day.totalCycles > 0
-      ? Math.round((day.activeCycles / day.totalCycles) * 100)
-      : 0;
-  const deltaStr =
-    day.balanceDelta !== null && day.balanceDelta !== 0
-      ? `<span class="delta ${day.balanceDelta > 0 ? "pos" : "neg"}">${day.balanceDelta > 0 ? "+" : ""}${day.balanceDelta.toLocaleString()} sats</span>`
-      : "";
-  const balStr =
-    day.balanceEnd !== null
-      ? `<span class="bal">${day.balanceEnd.toLocaleString()} sats</span>`
-      : "";
-  const eventCount = day.events.length;
-  const evtBadge =
-    eventCount > 0
-      ? `<span class="evt-badge">${eventCount} event${eventCount > 1 ? "s" : ""}</span>`
-      : "";
-  const errorBadge =
-    day.errorCycles > 0
-      ? `<span class="err-badge">${day.errorCycles} error${day.errorCycles > 1 ? "s" : ""}</span>`
-      : "";
+  const narrative = narrateDay(day);
 
-  // Cycle timeline
+  // Build cycle-by-cycle narrative timeline
   let timeline = "";
   for (const c of day.cycles) {
-    const time = c.timestamp.slice(11, 16);
     const borderClass =
       c.status === "active"
         ? "tl-active"
@@ -281,21 +354,7 @@ function renderDayCard(day: DaySummary): string {
           : c.status === "manual"
             ? "tl-manual"
             : "tl-idle";
-    const cycleLabel =
-      c.cycle !== null ? `Cycle ${c.cycle}` : "Manual";
-    const evts =
-      c.events.length > 0
-        ? `<span class="tl-events">${escapeHtml(c.events.join(", "))}</span>`
-        : "";
-    timeline += `<div class="tl-row ${borderClass}">
-<span class="tl-time">${time}</span>
-<span class="tl-label">${cycleLabel}</span>
-<span class="tl-status">${c.status}</span>
-${c.heartbeat !== null ? `<span class="tl-hb">#${c.heartbeat}</span>` : ""}
-${c.balance !== null ? `<span class="tl-bal">${c.balance.toLocaleString()}</span>` : ""}
-${c.balanceDelta !== null ? `<span class="tl-delta ${c.balanceDelta > 0 ? "pos" : "neg"}">${c.balanceDelta > 0 ? "+" : ""}${c.balanceDelta}</span>` : ""}
-${evts}
-</div>`;
+    timeline += `<div class="tl-row ${borderClass}">${narrateCycle(c)}</div>\n`;
   }
 
   return `<div class="day-card" onclick="this.classList.toggle('expanded')">
@@ -304,17 +363,11 @@ ${evts}
     <span class="day-label">${label}</span>
     <span class="day-date">${day.date}</span>
   </div>
-  <div class="day-stats">
-    ${errorBadge}
-    ${evtBadge}
-    <span class="day-cycles">${day.totalCycles} cycles${day.manualCommits > 0 ? ` + ${day.manualCommits} manual` : ""}</span>
-    ${ratio > 0 ? `<span class="day-ratio">${ratio}% active</span>` : ""}
-    ${deltaStr}
-    ${balStr}
-  </div>
   <span class="expand-icon"></span>
 </div>
+<div class="day-narrative">${narrative}</div>
 <div class="day-detail">
+  <div class="day-detail-label">Cycle-by-cycle log</div>
   <div class="day-timeline">${timeline}</div>
 </div>
 </div>`;
@@ -353,62 +406,49 @@ a:hover{opacity:0.8;text-decoration:underline}
 .hero-links a:hover{color:#f7931a}
 
 /* Status Bar */
-.status-bar{display:flex;align-items:center;gap:0.8rem;background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:0.8rem 1.2rem;margin-bottom:2rem;flex-wrap:wrap;font-size:0.9rem}
-.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-bar{display:flex;align-items:flex-start;gap:0.7rem;background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:1rem 1.2rem;margin-bottom:2rem;font-size:0.92rem;line-height:1.6}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:0.5rem}
 .status-dot.on{background:#00e05a;box-shadow:0 0 6px #00e05a80}
 .status-dot.off{background:#555}
-.status-sep{width:1px;height:1em;background:#2a2a2a}
-.status-item{color:#bbb}
-.status-item strong{color:#f7931a}
-.next-cycle{color:#777}
+.status-narrative{color:#bbb}
+.status-narrative strong{color:#f7931a}
+.next-cycle{color:#777;font-size:0.85rem}
 
 /* Section */
 h2{font-size:1.2rem;font-weight:700;color:#f7931a;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem}
 h2::before{content:'';display:inline-block;width:4px;height:1.1em;background:#f7931a;border-radius:2px}
 
 /* Day Cards */
-.day-card{background:#111;border:1px solid #1e1e1e;border-radius:10px;margin-bottom:0.6rem;cursor:pointer;transition:border-color 0.2s}
+.day-card{background:#111;border:1px solid #1e1e1e;border-radius:10px;margin-bottom:0.8rem;cursor:pointer;transition:border-color 0.2s}
 .day-card:hover{border-color:#333}
-.day-header{display:flex;align-items:center;justify-content:space-between;padding:0.9rem 1.2rem;gap:0.8rem;flex-wrap:wrap}
+.day-header{display:flex;align-items:center;justify-content:space-between;padding:0.9rem 1.2rem 0.3rem;gap:0.8rem}
 .day-left{display:flex;align-items:baseline;gap:0.6rem}
 .day-label{font-weight:700;color:#eee;font-size:0.95rem}
 .day-date{font-size:0.78rem;color:#555;font-family:'SF Mono',Monaco,Consolas,monospace}
-.day-stats{display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;font-size:0.82rem}
-.day-cycles{color:#888}
-.day-ratio{color:#f7931a;font-weight:600}
-.delta{font-weight:600;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.8rem}
-.delta.pos{color:#00e05a}
-.delta.neg{color:#ff4444}
-.bal{color:#666;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.8rem}
-.evt-badge{background:#f7931a20;color:#f7931a;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:600}
-.err-badge{background:#ff444420;color:#ff4444;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:600}
 .expand-icon{width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:5px solid #555;transition:transform 0.2s;flex-shrink:0}
 .day-card.expanded .expand-icon{transform:rotate(180deg)}
+
+/* Narrative */
+.day-narrative{padding:0.3rem 1.2rem 0.9rem;color:#bbb;font-size:0.9rem;line-height:1.65}
+.day-narrative strong{color:#f7931a}
 
 /* Day Detail */
 .day-detail{display:none;padding:0 1.2rem 1rem;border-top:1px solid #1a1a1a}
 .day-card.expanded .day-detail{display:block}
-.day-timeline{margin-top:0.6rem}
+.day-detail-label{font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#555;margin:0.7rem 0 0.4rem;padding-bottom:0.3rem}
+.day-timeline{margin-top:0.2rem}
 
 /* Timeline Rows */
-.tl-row{display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0.5rem;font-size:0.8rem;border-left:3px solid #222;margin-bottom:1px;border-radius:0 4px 4px 0;flex-wrap:wrap}
+.tl-row{padding:0.35rem 0.6rem;font-size:0.82rem;border-left:3px solid #222;margin-bottom:1px;border-radius:0 4px 4px 0;line-height:1.5;color:#999}
+.tl-row strong{color:#666;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.78rem;font-weight:400}
 .tl-row.tl-idle{border-left-color:#333;color:#666}
-.tl-row.tl-active{border-left-color:#f7931a;background:#f7931a08}
-.tl-row.tl-error{border-left-color:#ff4444;background:#ff444408}
-.tl-row.tl-manual{border-left-color:#8855ff;background:#8855ff08}
-.tl-time{font-family:'SF Mono',Monaco,Consolas,monospace;color:#555;min-width:3.2rem}
-.tl-label{font-weight:600;color:#bbb;min-width:5rem}
-.tl-row.tl-idle .tl-label{color:#555}
-.tl-status{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:#666;min-width:3.5rem}
-.tl-row.tl-active .tl-status{color:#f7931a}
-.tl-row.tl-error .tl-status{color:#ff4444}
-.tl-hb{color:#555;font-size:0.75rem}
-.tl-bal{color:#555;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.75rem}
-.tl-delta{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.75rem;font-weight:600}
+.tl-row.tl-active{border-left-color:#f7931a;background:#f7931a08;color:#bbb}
+.tl-row.tl-active strong{color:#888}
+.tl-row.tl-error{border-left-color:#ff4444;background:#ff444408;color:#ccc}
+.tl-row.tl-manual{border-left-color:#8855ff;background:#8855ff08;color:#bbb}
+.tl-delta{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.78rem;font-weight:600}
 .tl-delta.pos{color:#00e05a}
 .tl-delta.neg{color:#ff4444}
-.tl-events{color:#bbb;font-size:0.78rem;flex-basis:100%;padding-left:3.7rem;margin-top:0.1rem}
-.tl-row.tl-idle .tl-events{color:#777}
 
 /* Footer */
 footer{border-top:1px solid #1a1a1a;padding-top:1.5rem;margin-top:2rem;text-align:center;color:#555;font-size:0.85rem}
