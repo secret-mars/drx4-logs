@@ -1,5 +1,5 @@
 // drx4-logs — Secret Mars Daily Activity Dashboard
-// Reads git commit history from GitHub API, parses cycle data, renders dashboard
+// Reads git commit history from GitHub API, parses cycle data, renders narrative dashboard
 
 interface Commit {
   sha: string;
@@ -36,20 +36,6 @@ interface DaySummary {
   events: string[];
 }
 
-interface Health {
-  cycle: number;
-  timestamp: string;
-  status: string;
-  stats: {
-    checkin_count: number;
-    sbtc_balance: number;
-    idle_cycles_count: number;
-    tasks_executed: number;
-    replies_sent: number;
-  };
-  next_cycle_at: string;
-}
-
 // --- Data Layer ---
 
 async function fetchCommits(since: string, until: string): Promise<Commit[]> {
@@ -76,19 +62,6 @@ async function fetchCommits(since: string, until: string): Promise<Commit[]> {
   return commits;
 }
 
-async function fetchHealth(): Promise<Health | null> {
-  try {
-    const res = await fetch(
-      "https://raw.githubusercontent.com/secret-mars/drx4/main/daemon/health.json",
-      { headers: { "User-Agent": "drx4-logs-worker" } }
-    );
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
 // --- Parser ---
 
 function parseCommit(msg: string, timestamp: string): CycleEntry {
@@ -103,10 +76,8 @@ function parseCommit(msg: string, timestamp: string): CycleEntry {
     events: [],
   };
 
-  // Match "Cycle NNN:" pattern
   const cycleMatch = msg.match(/^Cycle\s+(\d+)(?:-\d+)?:/);
   if (!cycleMatch) {
-    // Non-cycle commit (e.g. "Loop adoption: ...")
     entry.events.push(msg.split("\n")[0]);
     return entry;
   }
@@ -114,7 +85,6 @@ function parseCommit(msg: string, timestamp: string): CycleEntry {
   entry.cycle = parseInt(cycleMatch[1]);
   const body = msg.slice(cycleMatch[0].length).trim();
 
-  // Determine status
   if (/\bidle\b/i.test(body)) {
     entry.status = "idle";
   } else if (/\b(fail|error|blocked)\b/i.test(body)) {
@@ -123,19 +93,15 @@ function parseCommit(msg: string, timestamp: string): CycleEntry {
     entry.status = "active";
   }
 
-  // Extract heartbeat
   const hbMatch = body.match(/heartbeat\s+#(\d+)/i);
   if (hbMatch) entry.heartbeat = parseInt(hbMatch[1]);
 
-  // Extract balance
   const balMatch = body.match(/balance\s+([\d,]+)\s*sats/i);
   if (balMatch) entry.balance = parseInt(balMatch[1].replace(/,/g, ""));
 
-  // Extract balance delta
   const deltaMatch = body.match(/\(([+-]\d[\d,]*)\)/);
   if (deltaMatch) entry.balanceDelta = parseInt(deltaMatch[1].replace(/,/g, ""));
 
-  // Extract notable events (anything that's not just "idle, heartbeat, balance")
   const parts = body.split(",").map((s) => s.trim());
   for (const part of parts) {
     if (/^idle$/i.test(part)) continue;
@@ -151,10 +117,9 @@ function parseCommit(msg: string, timestamp: string): CycleEntry {
 function groupByDay(commits: Commit[]): Map<string, CycleEntry[]> {
   const days = new Map<string, CycleEntry[]>();
 
-  // Commits come newest-first from GitHub API, reverse for chronological
   for (const c of [...commits].reverse()) {
     const ts = c.commit.author.date;
-    const date = ts.slice(0, 10); // YYYY-MM-DD UTC
+    const date = ts.slice(0, 10);
     const entry = parseCommit(c.commit.message, ts);
     if (!days.has(date)) days.set(date, []);
     days.get(date)!.push(entry);
@@ -223,17 +188,18 @@ function formatDate(dateStr: string): string {
   return `${days[d.getUTCDay()]}, ${months[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
-// --- HTML Rendering ---
+// --- Narrative ---
 
 function narrateDay(day: DaySummary): string {
   const parts: string[] = [];
 
-  // Opening: what happened
   if (day.totalCycles === 0 && day.manualCommits === 0) {
     return "No recorded activity this day.";
   }
 
-  if (day.activeCycles > 0 && day.idleCycles > 0) {
+  if (day.totalCycles === 0 && day.manualCommits > 0) {
+    parts.push(`${day.manualCommits} manual action${day.manualCommits > 1 ? "s" : ""} logged (no autonomous cycles).`);
+  } else if (day.activeCycles > 0 && day.idleCycles > 0) {
     parts.push(
       `Ran ${day.totalCycles} cycles &mdash; ${day.activeCycles} active, ${day.idleCycles} on standby.`
     );
@@ -245,14 +211,12 @@ function narrateDay(day: DaySummary): string {
     parts.push(`Ran ${day.totalCycles} cycles, all active.`);
   }
 
-  // Errors
   if (day.errorCycles > 0) {
     parts.push(
       `Hit ${day.errorCycles} issue${day.errorCycles > 1 ? "s" : ""} (see details below).`
     );
   }
 
-  // Balance narrative
   if (day.balanceDelta !== null && day.balanceDelta > 0) {
     parts.push(
       `Balance grew by ${day.balanceDelta.toLocaleString()} sats to ${day.balanceEnd!.toLocaleString()} sats.`
@@ -265,17 +229,15 @@ function narrateDay(day: DaySummary): string {
     parts.push(`Balance steady at ${day.balanceEnd.toLocaleString()} sats.`);
   }
 
-  // Heartbeats
   if (day.heartbeatStart !== null && day.heartbeatEnd !== null) {
     const hbCount = day.heartbeatEnd - day.heartbeatStart + 1;
     if (hbCount > 1) {
-      parts.push(`Sent ${hbCount} heartbeats (#${day.heartbeatStart}&ndash;#${day.heartbeatEnd}).`);
+      parts.push(`Sent ${hbCount} heartbeats to AIBTC.`);
     } else {
-      parts.push(`Sent heartbeat #${day.heartbeatEnd}.`);
+      parts.push(`Sent 1 heartbeat to AIBTC.`);
     }
   }
 
-  // Notable events (the interesting stuff)
   if (day.events.length > 0) {
     const unique = [...new Set(day.events)];
     if (unique.length <= 3) {
@@ -283,7 +245,7 @@ function narrateDay(day: DaySummary): string {
     } else {
       parts.push(
         "Notable: " + unique.slice(0, 3).join(". ") +
-        `, and ${unique.length - 3} more event${unique.length - 3 > 1 ? "s" : ""}.`
+        `, and ${unique.length - 3} more.`
       );
     }
   }
@@ -291,30 +253,9 @@ function narrateDay(day: DaySummary): string {
   return parts.join(" ");
 }
 
-function renderStatusBar(health: Health | null): string {
-  if (!health) {
-    return `<div class="status-bar"><span class="status-dot off"></span><span class="status-narrative">Agent status unavailable.</span></div>`;
-  }
-  const nextAt = new Date(health.next_cycle_at);
-  const bal = health.stats.sbtc_balance.toLocaleString();
-  const idle = health.stats.idle_cycles_count;
-  const statusText = idle > 5
-    ? `On standby since ${idle} cycles, watching for messages.`
-    : "Active and running tasks.";
-  return `<div class="status-bar">
-<span class="status-dot on"></span>
-<span class="status-narrative">
-<strong>Cycle ${health.cycle}</strong> &mdash; ${statusText}
-Balance: <strong>${bal} sats</strong>. Heartbeat #${health.stats.checkin_count}.
-<span class="next-cycle" data-next="${nextAt.toISOString()}">Next wake-up in <span class="countdown"></span>.</span>
-</span>
-</div>`;
-}
-
 function narrateCycle(c: CycleEntry): string {
   const time = c.timestamp.slice(11, 16);
   if (c.cycle === null) {
-    // Manual commit
     return `<strong>${time}</strong> &mdash; ${escapeHtml(c.message)}`;
   }
   const parts: string[] = [];
@@ -337,13 +278,14 @@ function narrateCycle(c: CycleEntry): string {
   return `<strong>${time}</strong> Cycle ${c.cycle}: ${parts.join(" ")}`;
 }
 
+// --- HTML Rendering ---
+
 function renderDayCard(day: DaySummary): string {
   const today = new Date().toISOString().slice(0, 10);
   const isToday = day.date === today;
   const label = isToday ? "Today" : formatDate(day.date);
   const narrative = narrateDay(day);
 
-  // Build cycle-by-cycle narrative timeline
   let timeline = "";
   for (const c of day.cycles) {
     const borderClass =
@@ -381,15 +323,28 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function renderPage(days: DaySummary[], health: Health | null): string {
+function renderPage(days: DaySummary[]): string {
   const dayCards = days.map(renderDayCard).join("\n");
+
+  // Derive last-updated from most recent cycle data
+  let lastUpdated = "";
+  for (const day of days) {
+    if (day.cycles.length > 0) {
+      const last = day.cycles[day.cycles.length - 1];
+      const d = new Date(last.timestamp);
+      lastUpdated = formatDate(day.date) + " at " + d.toISOString().slice(11, 16) + " UTC";
+      if (last.cycle !== null) lastUpdated = `Cycle ${last.cycle} &mdash; ` + lastUpdated;
+      break;
+    }
+  }
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SECRET MARS — Activity Logs</title>
-<meta name="description" content="Daily activity dashboard for Secret Mars autonomous agent.">
+<meta name="description" content="Daily activity dashboard for Secret Mars autonomous agent. Updated every 24 hours.">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#d4d4d4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:1rem;line-height:1.7}
@@ -404,15 +359,8 @@ a:hover{opacity:0.8;text-decoration:underline}
 .hero-links{margin-top:0.6rem;font-size:0.85rem;color:#555}
 .hero-links a{color:#888;margin:0 0.4rem}
 .hero-links a:hover{color:#f7931a}
-
-/* Status Bar */
-.status-bar{display:flex;align-items:flex-start;gap:0.7rem;background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:1rem 1.2rem;margin-bottom:2rem;font-size:0.92rem;line-height:1.6}
-.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:0.5rem}
-.status-dot.on{background:#00e05a;box-shadow:0 0 6px #00e05a80}
-.status-dot.off{background:#555}
-.status-narrative{color:#bbb}
-.status-narrative strong{color:#f7931a}
-.next-cycle{color:#777;font-size:0.85rem}
+.last-updated{margin-top:0.7rem;font-size:0.82rem;color:#555}
+.last-updated strong{color:#888}
 
 /* Section */
 h2{font-size:1.2rem;font-weight:700;color:#f7931a;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem}
@@ -430,7 +378,6 @@ h2::before{content:'';display:inline-block;width:4px;height:1.1em;background:#f7
 
 /* Narrative */
 .day-narrative{padding:0.3rem 1.2rem 0.9rem;color:#bbb;font-size:0.9rem;line-height:1.65}
-.day-narrative strong{color:#f7931a}
 
 /* Day Detail */
 .day-detail{display:none;padding:0 1.2rem 1rem;border-top:1px solid #1a1a1a}
@@ -458,11 +405,10 @@ footer a{color:#f7931a}
 @media(max-width:600px){
   main{padding:2rem 1rem}
   .hero h1{font-size:1.8rem}
-  .status-bar{font-size:0.82rem;gap:0.5rem;padding:0.6rem 0.8rem}
-  .day-header{padding:0.7rem 0.8rem}
+  .day-header{padding:0.7rem 0.8rem 0.2rem}
+  .day-narrative{padding:0.2rem 0.8rem 0.7rem}
   .day-detail{padding:0 0.8rem 0.8rem}
-  .tl-events{padding-left:0;flex-basis:100%}
-  .tl-row{gap:0.3rem;padding:0.3rem 0.3rem}
+  .tl-row{padding:0.3rem 0.3rem}
 }
 </style>
 </head>
@@ -477,9 +423,8 @@ footer a{color:#f7931a}
 <a href="https://github.com/secret-mars/drx4">GitHub</a>
 <a href="https://aibtc.com">AIBTC</a>
 </div>
+${lastUpdated ? `<div class="last-updated">Last activity: <strong>${lastUpdated}</strong></div>` : ""}
 </div>
-
-${renderStatusBar(health)}
 
 <h2>Last 7 Days</h2>
 ${dayCards || '<div style="color:#555;font-size:0.9rem;padding:1rem 0">No activity data found.</div>'}
@@ -489,22 +434,6 @@ ${dayCards || '<div style="color:#555;font-size:0.9rem;padding:1rem 0">No activi
 </footer>
 
 </main>
-<script>
-// Countdown timer for next cycle
-function updateCountdown(){
-  const el=document.querySelector('.countdown');
-  const parent=document.querySelector('.next-cycle');
-  if(!el||!parent)return;
-  const next=new Date(parent.dataset.next);
-  const diff=next-Date.now();
-  if(diff<=0){el.textContent='now';return}
-  const m=Math.floor(diff/60000);
-  const s=Math.floor((diff%60000)/1000);
-  el.textContent=m+'m '+s+'s';
-}
-updateCountdown();
-setInterval(updateCountdown,1000);
-</script>
 </body>
 </html>`;
 }
@@ -516,11 +445,6 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/api/health") {
-      const health = await fetchHealth();
-      return jsonResponse(health);
-    }
-
     if (path === "/api/days") {
       const n = Math.min(parseInt(url.searchParams.get("n") || "7"), 30);
       const data = await getDaySummaries(n);
@@ -528,17 +452,13 @@ export default {
     }
 
     // Default: HTML dashboard
-    const [days, health] = await Promise.all([
-      getDaySummaries(7),
-      fetchHealth(),
-    ]);
-
-    const html = renderPage(days, health);
+    const days = await getDaySummaries(7);
+    const html = renderPage(days);
     return new Response(html, {
       headers: {
         "Content-Type": "text/html;charset=utf-8",
         "Cache-Control":
-          "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+          "public, max-age=3600, s-maxage=86400, stale-while-revalidate=3600",
       },
     });
   },
@@ -551,11 +471,10 @@ async function getDaySummaries(n: number): Promise<DaySummary[]> {
   const grouped = groupByDay(commits);
 
   const summaries: DaySummary[] = [];
-  // Build day list from most recent to oldest
   for (let i = 0; i < n; i++) {
     const date = daysAgo(i);
     const cycles = grouped.get(date) || [];
-    if (cycles.length === 0 && i > 0) continue; // skip empty past days
+    if (cycles.length === 0 && i > 0) continue;
     summaries.push(summarizeDay(date, cycles));
   }
 
@@ -567,7 +486,7 @@ function jsonResponse(data: unknown): Response {
     headers: {
       "Content-Type": "application/json;charset=utf-8",
       "Cache-Control":
-        "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+        "public, max-age=3600, s-maxage=86400, stale-while-revalidate=3600",
       "Access-Control-Allow-Origin": "*",
     },
   });
